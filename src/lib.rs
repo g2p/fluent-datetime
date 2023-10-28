@@ -5,6 +5,7 @@ use fluent_bundle::bundle::FluentBundle;
 use fluent_bundle::types::FluentType;
 use fluent_bundle::{FluentArgs, FluentError, FluentValue};
 
+use icu_calendar::Gregorian;
 use icu_datetime::options::length;
 
 fn val_as_str<'a>(val: &'a FluentValue) -> Option<&'a str> {
@@ -16,7 +17,8 @@ fn val_as_str<'a>(val: &'a FluentValue) -> Option<&'a str> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct FluentDateTimeOptions {
+#[non_exhaustive]
+pub struct FluentDateTimeOptions {
     // This calendar arg makes loading provider data and memoizing formatters harder
     // In particular, the AnyCalendarKind logic (in
     // AnyCalendarKind::from_data_locale_with_fallback) that defaults to
@@ -26,11 +28,28 @@ pub(crate) struct FluentDateTimeOptions {
     //calendar: Option<icu_calendar::AnyCalendarKind>,
     // We don't handle icu_datetime per-component settings atm, it is experimental
     // and length is expressive enough
-    length: icu_datetime::options::length::Bag,
+    pub length: length::Bag,
+}
+
+impl Default for FluentDateTimeOptions {
+    /// Defaults to showing a short date
+    ///
+    /// The intent is to emulate the Intl.DateTimeFormat default:
+    /// The default value for each date-time component option is undefined, but
+    /// if all component properties are undefined, then year, month, and day default
+    /// to "numeric". If any of the date-time component options is specified, then
+    /// dateStyle and timeStyle must be undefined.
+    ///
+    /// From <https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/DateTimeFormat/DateTimeFormat>
+    fn default() -> Self {
+        Self {
+            length: length::Bag::from_date_style(length::Date::Short),
+        }
+    }
 }
 
 impl FluentDateTimeOptions {
-    pub fn merge(&mut self, other: &FluentArgs) -> Result<(), ()> {
+    fn merge_args(&mut self, other: &FluentArgs) -> Result<(), ()> {
         // TODO set an err state on self to match fluent-js behaviour
         for (k, v) in other.iter() {
             match k {
@@ -72,8 +91,8 @@ impl Eq for FluentDateTimeOptions {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FluentDateTime {
-    value: icu_calendar::DateTime<icu_calendar::Iso>,
-    options: FluentDateTimeOptions,
+    value: icu_calendar::DateTime<Gregorian>,
+    pub options: FluentDateTimeOptions,
 }
 
 impl FluentType for FluentDateTime {
@@ -113,6 +132,21 @@ impl FluentType for FluentDateTime {
         dtf.format_to_string(&self.value.to_any())
             .unwrap_or("".to_string())
             .into()
+    }
+}
+
+impl From<icu_calendar::DateTime<Gregorian>> for FluentDateTime {
+    fn from(value: icu_calendar::DateTime<Gregorian>) -> Self {
+        Self {
+            value,
+            options: Default::default(),
+        }
+    }
+}
+
+impl From<FluentDateTime> for FluentValue<'static> {
+    fn from(value: FluentDateTime) -> Self {
+        Self::Custom(Box::new(value))
     }
 }
 
@@ -168,7 +202,7 @@ pub(crate) fn datetime_func<'a>(
         Some(FluentValue::Custom(cus)) => {
             if let Some(dt) = cus.as_any().downcast_ref::<FluentDateTime>() {
                 let mut dt = dt.clone();
-                let Ok(()) = dt.options.merge(named) else {
+                let Ok(()) = dt.options.merge_args(named) else {
                     return FluentValue::Error;
                 };
                 FluentValue::Custom(Box::new(dt))
