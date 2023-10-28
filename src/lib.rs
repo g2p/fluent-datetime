@@ -28,6 +28,8 @@ pub struct FluentDateTimeOptions {
     //calendar: Option<icu_calendar::AnyCalendarKind>,
     // We don't handle icu_datetime per-component settings atm, it is experimental
     // and length is expressive enough
+    // TODO: don't expose length, expose something similar to the Intl API
+    // and the Fluent arguments?
     pub length: length::Bag,
 }
 
@@ -194,6 +196,8 @@ impl intl_memoizer::Memoizable for GimmeTheLocale {
 /// A FluentFunction for formatted datetimes
 ///
 /// Documented on [BundleExt::add_datetime_support] as the function isn't public
+// https://github.com/projectfluent/fluent/wiki/Error-Handling
+// argues for graceful recovery (think lingering trauma from XUL DTD errors)
 pub(crate) fn datetime_func<'a>(
     positional: &[FluentValue<'a>],
     named: &FluentArgs,
