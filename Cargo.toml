@@ -2,6 +2,9 @@
 name = "fluent-datetime"
 version = "0.1.0"
 edition = "2021"
+description = "Integrate ICU international date formatting with Fluent translations"
+license = "ISC"
+repository = "https://github.com/g2p/fluent-datetime"
 
 [dependencies]
 fluent-bundle = "0.15"
