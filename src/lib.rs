@@ -1,3 +1,104 @@
+//! # International datetimes in fluent translations
+//!
+//! fluent-datetime uses ICU4X, in particular [`icu_datetime`] and
+//! [`icu_calendar`], to format datetimes internationally within the context of a
+//! [fluent] translation.
+//!
+//! [fluent]: https://projectfluent.org/
+//!
+//! # Example
+//!
+//! This example uses [`fluent_bundle`] directly.
+//!
+//! You may prefer to use less verbose integrations; in which case the
+//! [`bundle.add_datetime_support()`](BundleExt::add_datetime_support) line is the only one you need.
+//!
+//! ```rust
+//! use fluent::fluent_args;
+//! use fluent_bundle::{FluentBundle, FluentResource};
+//! use fluent_datetime::{BundleExt, FluentDateTime};
+//! use icu_calendar::DateTime;
+//! use icu_datetime::options::length;
+//! use unic_langid::LanguageIdentifier;
+//!
+//! // Create a FluentBundle
+//! let langid_en: LanguageIdentifier = "en-US".parse()?;
+//! let mut bundle = FluentBundle::new(vec![langid_en]);
+//!
+//! // Register the DATETIME function
+//! bundle.add_datetime_support();
+//!
+//! // Add a FluentResource to the bundle
+//! let ftl_string = r#"
+//! today-is = Today is {$date}
+//! today-is-fulldate = Today is {DATETIME($date, dateStyle: "full")}
+//! now-is-time = Now is {DATETIME($date, timeStyle: "medium")}
+//! now-is-datetime = Now is {DATETIME($date, dateStyle: "full", timeStyle: "short")}
+//! "#
+//! .to_string();
+//!
+//! let res = FluentResource::try_new(ftl_string)
+//!     .expect("Failed to parse an FTL string.");
+//! bundle
+//!     .add_resource(res)
+//!     .expect("Failed to add FTL resources to the bundle.");
+//!
+//! // Create an ICU DateTime
+//! let datetime = DateTime::try_new_iso_datetime(1989, 11, 9, 23, 30, 0)
+//!     .expect("Failed to create ICU DateTime");
+//!
+//! // Convert to FluentDateTime
+//! let mut datetime = FluentDateTime::from(datetime);
+//!
+//! // Format some messages with date arguments
+//! let mut errors = vec![];
+//!
+//! assert_eq!(
+//!     bundle.format_pattern(
+//!         &bundle.get_message("today-is").unwrap().value().unwrap(),
+//!         Some(&fluent_args!("date" => datetime.clone())), &mut errors),
+//!     "Today is \u{2068}11/9/89\u{2069}"
+//! );
+//!
+//! assert_eq!(
+//!     bundle.format_pattern(
+//!         &bundle.get_message("today-is-fulldate").unwrap().value().unwrap(),
+//!         Some(&fluent_args!("date" => datetime.clone())), &mut errors),
+//!     "Today is \u{2068}Thursday, November 9, 1989\u{2069}"
+//! );
+//!
+//! assert_eq!(
+//!     bundle.format_pattern(
+//!         &bundle.get_message("now-is-time").unwrap().value().unwrap(),
+//!         Some(&fluent_args!("date" => datetime.clone())), &mut errors),
+//!     "Now is \u{2068}11:30:00\u{202f}PM\u{2069}"
+//! );
+//!
+//! assert_eq!(
+//!     bundle.format_pattern(
+//!         &bundle.get_message("now-is-datetime").unwrap().value().unwrap(),
+//!         Some(&fluent_args!("date" => datetime.clone())), &mut errors),
+//!     "Now is \u{2068}Thursday, November 9, 1989, 11:30\u{202f}PM\u{2069}"
+//! );
+//!
+//! // Set FluentDateTime.options in code rather than in translation data
+//! // This is useful because it sets presentation options that are
+//! // shared between all locales
+//! datetime.options.set_date_style(Some(length::Date::Full));
+//! assert_eq!(
+//!     bundle.format_pattern(
+//!         &bundle.get_message("today-is").unwrap().value().unwrap(),
+//!         Some(&fluent_args!("date" => datetime)), &mut errors),
+//!     "Today is \u{2068}Thursday, November 9, 1989\u{2069}"
+//! );
+//!
+//! assert!(errors.is_empty());
+//!
+//! # // I would like to use the ? operator, but fluent and icu error types don't implement the std Error trait…
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
 use std::borrow::Cow;
 use std::mem::discriminant;
 
@@ -5,7 +106,7 @@ use fluent_bundle::bundle::FluentBundle;
 use fluent_bundle::types::FluentType;
 use fluent_bundle::{FluentArgs, FluentError, FluentValue};
 
-use icu_calendar::Gregorian;
+use icu_calendar::{Gregorian, Iso};
 use icu_datetime::options::length;
 
 fn val_as_str<'a>(val: &'a FluentValue) -> Option<&'a str> {
@@ -16,8 +117,8 @@ fn val_as_str<'a>(val: &'a FluentValue) -> Option<&'a str> {
     }
 }
 
+/// Options for formatting a DateTime
 #[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
 pub struct FluentDateTimeOptions {
     // This calendar arg makes loading provider data and memoizing formatters harder
     // In particular, the AnyCalendarKind logic (in
@@ -27,30 +128,62 @@ pub struct FluentDateTimeOptions {
     // if it is the correct one for the calendar we want.
     //calendar: Option<icu_calendar::AnyCalendarKind>,
     // We don't handle icu_datetime per-component settings atm, it is experimental
-    // and length is expressive enough
-    // TODO: don't expose length, expose something similar to the Intl API
-    // and the Fluent arguments?
-    pub length: length::Bag,
+    // and length is expressive enough so far
+    length: length::Bag,
 }
 
 impl Default for FluentDateTimeOptions {
     /// Defaults to showing a short date
     ///
-    /// The intent is to emulate the Intl.DateTimeFormat default:
-    /// The default value for each date-time component option is undefined, but
-    /// if all component properties are undefined, then year, month, and day default
-    /// to "numeric". If any of the date-time component options is specified, then
-    /// dateStyle and timeStyle must be undefined.
+    /// The intent is to emulate [Intl.DateTimeFormat] behavior:
+    /// > The default value for each date-time component option is undefined,
+    /// > but if all component properties are undefined, then year, month, and day default
+    /// > to "numeric". If any of the date-time component options is specified, then
+    /// > dateStyle and timeStyle must be undefined.
     ///
-    /// From <https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/DateTimeFormat/DateTimeFormat>
+    /// In terms of the current Rust implementation:
+    ///
+    /// The default value for each date-time style option is None, but if both
+    /// are unset, we display the date only, using the `length::Date::Short`
+    /// style.
+    ///
+    /// [Intl.DateTimeFormat]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/DateTimeFormat/DateTimeFormat
     fn default() -> Self {
         Self {
-            length: length::Bag::from_date_style(length::Date::Short),
+            length: length::Bag::empty(),
         }
     }
 }
 
 impl FluentDateTimeOptions {
+    /// Set a date style, from verbose to compact
+    ///
+    /// See [`icu_datetime::options::length::Date`].
+    pub fn set_date_style(&mut self, style: Option<length::Date>) {
+        self.length.date = style;
+    }
+
+    /// Set a time style, from verbose to compact
+    ///
+    /// See [`icu_datetime::options::length::Time`].
+    pub fn set_time_style(&mut self, style: Option<length::Time>) {
+        self.length.time = style;
+    }
+
+    fn make_formatter(
+        &self,
+        locale: &icu_provider::DataLocale,
+    ) -> Result<DateTimeFormatter, icu_datetime::DateTimeError> {
+        let mut length = self.length;
+        if length == length::Bag::empty() {
+            length = length::Bag::from_date_style(length::Date::Short);
+        }
+        Ok(DateTimeFormatter(icu_datetime::DateTimeFormatter::try_new(
+            locale,
+            length.into(),
+        )?))
+    }
+
     fn merge_args(&mut self, other: &FluentArgs) -> Result<(), ()> {
         // TODO set an err state on self to match fluent-js behaviour
         for (k, v) in other.iter() {
@@ -62,7 +195,7 @@ impl FluentDateTimeOptions {
                         "medium" => length::Date::Medium,
                         "short" => length::Date::Short,
                         _ => return Err(()),
-                    })
+                    });
                 }
                 "timeStyle" => {
                     self.length.time = Some(match val_as_str(v).ok_or(())? {
@@ -71,7 +204,7 @@ impl FluentDateTimeOptions {
                         "medium" => length::Time::Medium,
                         "short" => length::Time::Short,
                         _ => return Err(()),
-                    })
+                    });
                 }
                 _ => (), // Ignore with no warning
             }
@@ -91,9 +224,30 @@ impl std::hash::Hash for FluentDateTimeOptions {
 
 impl Eq for FluentDateTimeOptions {}
 
+/// An ICU [`DateTime`](icu_calendar::DateTime) with attached formatting options
+///
+/// Construct from an [`icu_calendar::DateTime`] using From / Into.
+///
+/// Convert to a [`FluentValue`] with From / Into.
+///
+/// See [`FluentDateTimeOptions`] and [`FluentDateTimeOptions::default`].
+///
+///```
+/// use icu_calendar::DateTime;
+/// use fluent_datetime::FluentDateTime;
+///
+/// let datetime = DateTime::try_new_iso_datetime(1989, 11, 9, 23, 30, 0)
+///     .expect("Failed to create ICU DateTime");
+///
+/// let datetime = FluentDateTime::from(datetime);
+// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct FluentDateTime {
+    // Iso seemed like a natural default, but [AnyCalendarKind::from_data_locale_with_fallback]
+    // loads Gregorian in almost all cases.  Differences have to do with eras:
+    // proleptic Gregorian has BCE / CE and no year zero, iso has just the one era and a year zero
     value: icu_calendar::DateTime<Gregorian>,
+    /// Options for rendering
     pub options: FluentDateTimeOptions,
 }
 
@@ -108,10 +262,10 @@ impl FluentType for FluentDateTime {
             .with_try_get::<DateTimeFormatter, _, _>(self.options.clone(), |dtf| {
                 dtf.0
                     .format_to_string(&self.value.to_any())
-                    .unwrap_or("".to_string())
-                    .into()
+                    .unwrap_or_default()
             })
-            .unwrap_or("".into())
+            .unwrap_or_default()
+            .into()
     }
 
     fn as_string_threadsafe(
@@ -126,13 +280,12 @@ impl FluentType for FluentDateTime {
         else {
             return "".into();
         };
-        let locale = icu_provider::DataLocale::from(langid);
-        let Ok(dtf) = icu_datetime::DateTimeFormatter::try_new(&locale, self.options.length.into())
-        else {
+        let Ok(dtf) = self.options.make_formatter(&langid.into()) else {
             return "".into();
         };
-        dtf.format_to_string(&self.value.to_any())
-            .unwrap_or("".to_string())
+        dtf.0
+            .format_to_string(&self.value.to_any())
+            .unwrap_or_default()
             .into()
     }
 }
@@ -141,6 +294,15 @@ impl From<icu_calendar::DateTime<Gregorian>> for FluentDateTime {
     fn from(value: icu_calendar::DateTime<Gregorian>) -> Self {
         Self {
             value,
+            options: Default::default(),
+        }
+    }
+}
+
+impl From<icu_calendar::DateTime<Iso>> for FluentDateTime {
+    fn from(value: icu_calendar::DateTime<Iso>) -> Self {
+        Self {
+            value: value.to_calendar(Gregorian),
             options: Default::default(),
         }
     }
@@ -168,10 +330,7 @@ impl intl_memoizer::Memoizable for DateTimeFormatter {
     {
         // Convert LanguageIdentifier from unic_langid to icu_locid
         let langid: icu_locid::LanguageIdentifier = lang.to_string().parse().map_err(|_| ())?;
-        let locale = icu_provider::DataLocale::from(langid);
-        let inner = icu_datetime::DateTimeFormatter::try_new(&locale, args.length.into())
-            .map_err(|_| ())?;
-        Ok(Self(inner))
+        args.make_formatter(&langid.into()).map_err(|_| ())
     }
 }
 
@@ -193,9 +352,9 @@ impl intl_memoizer::Memoizable for GimmeTheLocale {
     }
 }
 
-/// A FluentFunction for formatted datetimes
+/// A [`FluentFunction`] for formatted datetimes
 ///
-/// Documented on [BundleExt::add_datetime_support] as the function isn't public
+/// Documented on [`BundleExt::add_datetime_support`] as the function isn't public
 // https://github.com/projectfluent/fluent/wiki/Error-Handling
 // argues for graceful recovery (think lingering trauma from XUL DTD errors)
 pub(crate) fn datetime_func<'a>(
@@ -218,17 +377,23 @@ pub(crate) fn datetime_func<'a>(
     }
 }
 
+/// Extension trait to register DateTime support on [`FluentBundle`]
+///
+/// [`FluentDateTime`] values are rendered automatically, but you need to call
+/// [`BundleExt::add_datetime_support`] at bundle creation time when using the `DATETIME`
+/// function inside FTL resources.
 pub trait BundleExt {
     /// Registers the `DATETIME` function
     ///
-    /// Call this on a [`FluentBundle`]
+    /// Call this on a [`FluentBundle`].
     ///
     /// See [`DATETIME` in the Fluent guide](https://projectfluent.org/fluent/guide/functions.html#datetime)
     /// and [the `Intl.DateTimeFormat` constructor](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/DateTimeFormat/DateTimeFormat) from [ECMA 402](https://tc39.es/ecma402/#sec-createdatetimeformat).
     ///
     /// We currently implement only a subset of the formatting options:
-    /// * dateStyle
-    /// * timeStyle
+    /// * `dateStyle`
+    /// * `timeStyle`
+    ///
     /// Unknown options and extra positional arguments are ignored, unknown values of
     /// known options cause the date to be returned as-is.
     fn add_datetime_support(&mut self) -> Result<(), FluentError>;
