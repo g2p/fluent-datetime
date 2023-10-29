@@ -16,4 +16,9 @@ intl-memoizer = "0.5"
 unic-langid = "0.9"
 
 [dev-dependencies]
+criterion = "0.5"
 fluent = "0.16"
+
+[[bench]]
+name = "icu-formatter-instanciation"
+harness = false
