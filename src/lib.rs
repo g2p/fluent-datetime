@@ -1,17 +1,19 @@
-//! # International datetimes in fluent translations
+//! # International datetimes in Fluent translations
 //!
-//! fluent-datetime uses ICU4X, in particular [`icu_datetime`] and
-//! [`icu_calendar`], to format datetimes internationally within the context of a
-//! [fluent] translation.
+//! fluent-datetime uses [ICU4X], in particular [`icu_datetime`] and
+//! [`icu_calendar`], to format datetimes internationally within
+//! a [Fluent] translation.
 //!
-//! [fluent]: https://projectfluent.org/
+//! [Fluent]: https://projectfluent.org/
+//! [ICU4X]: https://github.com/unicode-org/icu4x
 //!
 //! # Example
 //!
 //! This example uses [`fluent_bundle`] directly.
 //!
 //! You may prefer to use less verbose integrations; in which case the
-//! [`bundle.add_datetime_support()`](BundleExt::add_datetime_support) line is the only one you need.
+//! [`bundle.add_datetime_support()`](BundleExt::add_datetime_support)
+//! line is the only one you need.
 //!
 //! ```rust
 //! use fluent::fluent_args;
@@ -94,7 +96,7 @@
 //!
 //! assert!(errors.is_empty());
 //!
-//! # // I would like to use the ? operator, but fluent and icu error types don't implement the std Error trait…
+//! # // I would like to use the ? operator, but Fluent and ICU error types don't implement the std Error trait…
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 #![forbid(unsafe_code)]
@@ -352,15 +354,45 @@ impl intl_memoizer::Memoizable for GimmeTheLocale {
     }
 }
 
-/// A [`FluentFunction`] for formatted datetimes
+/// A Fluent function for formatted datetimes
 ///
-/// Documented on [`BundleExt::add_datetime_support`] as the function isn't public
-// https://github.com/projectfluent/fluent/wiki/Error-Handling
-// argues for graceful recovery (think lingering trauma from XUL DTD errors)
-pub(crate) fn datetime_func<'a>(
-    positional: &[FluentValue<'a>],
-    named: &FluentArgs,
-) -> FluentValue<'a> {
+/// Normally you would register this using
+/// [`BundleExt::add_datetime_support`]; you would not use it directly.
+///
+/// However, some frameworks like [l10n](https://lib.rs/crates/l10n)
+/// require functions to be set up like this:
+///
+/// ```ignore
+/// l10n::init!({
+///     functions: { "DATETIME": fluent_datetime::DATETIME }
+/// });
+/// ```
+///
+/// # Usage
+///
+/// ```fluent
+/// today-is = Today is {$date}
+/// today-is-fulldate = Today is {DATETIME($date, dateStyle: "full")}
+/// now-is-time = Now is {DATETIME($date, timeStyle: "medium")}
+/// now-is-datetime = Now is {DATETIME($date, dateStyle: "full", timeStyle: "short")}
+/// ````
+///
+/// See [`DATETIME` in the Fluent guide][datetime-fluent]
+/// and [the `Intl.DateTimeFormat` constructor][Intl.DateTimeFormat]
+/// from [ECMA 402] for how to use this inside a Fluent document.
+///
+/// We currently implement only a subset of the formatting options:
+/// * `dateStyle`
+/// * `timeStyle`
+///
+/// Unknown options and extra positional arguments are ignored, unknown values
+/// of known options cause the date to be returned as-is.
+///
+/// [datetime-fluent]: https://projectfluent.org/fluent/guide/functions.html#datetime
+/// [Intl.DateTimeFormat]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/DateTimeFormat/DateTimeFormat
+/// [ECMA 402]: https://tc39.es/ecma402/#sec-createdatetimeformat
+#[allow(non_snake_case)]
+pub fn DATETIME<'a>(positional: &[FluentValue<'a>], named: &FluentArgs) -> FluentValue<'a> {
     match positional.get(0) {
         Some(FluentValue::Custom(cus)) => {
             if let Some(dt) = cus.as_any().downcast_ref::<FluentDateTime>() {
@@ -373,6 +405,9 @@ pub(crate) fn datetime_func<'a>(
                 FluentValue::Error
             }
         }
+        // https://github.com/projectfluent/fluent/wiki/Error-Handling
+        // argues for graceful recovery (think lingering trauma from XUL DTD
+        // errors)
         _ => FluentValue::Error,
     }
 }
@@ -380,28 +415,19 @@ pub(crate) fn datetime_func<'a>(
 /// Extension trait to register DateTime support on [`FluentBundle`]
 ///
 /// [`FluentDateTime`] values are rendered automatically, but you need to call
-/// [`BundleExt::add_datetime_support`] at bundle creation time when using the `DATETIME`
-/// function inside FTL resources.
+/// [`BundleExt::add_datetime_support`] at bundle creation time when using
+/// the [`DATETIME`] function inside FTL resources.
 pub trait BundleExt {
-    /// Registers the `DATETIME` function
+    /// Registers the [`DATETIME`] function
     ///
     /// Call this on a [`FluentBundle`].
     ///
-    /// See [`DATETIME` in the Fluent guide](https://projectfluent.org/fluent/guide/functions.html#datetime)
-    /// and [the `Intl.DateTimeFormat` constructor](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/DateTimeFormat/DateTimeFormat) from [ECMA 402](https://tc39.es/ecma402/#sec-createdatetimeformat).
-    ///
-    /// We currently implement only a subset of the formatting options:
-    /// * `dateStyle`
-    /// * `timeStyle`
-    ///
-    /// Unknown options and extra positional arguments are ignored, unknown values of
-    /// known options cause the date to be returned as-is.
     fn add_datetime_support(&mut self) -> Result<(), FluentError>;
 }
 
 impl<R, M> BundleExt for FluentBundle<R, M> {
     fn add_datetime_support(&mut self) -> Result<(), FluentError> {
-        self.add_function("DATETIME", datetime_func)?;
+        self.add_function("DATETIME", DATETIME)?;
         //self.set_formatter(Some(datetime_formatter));
         Ok(())
     }
