@@ -16,7 +16,7 @@ intl-memoizer = "0.5.3"
 unic-langid = "0.9"
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 fluent = "0.17"
 
 [[bench]]

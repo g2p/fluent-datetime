@@ -1,4 +1,6 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
+
+use criterion::{criterion_group, criterion_main, Criterion};
 use icu_calendar::{AnyCalendar, DateTime, Gregorian};
 use icu_datetime::options::length;
 use icu_datetime::{DateTimeFormatter, TypedDateTimeFormatter};
