@@ -19,8 +19,9 @@
 //! use fluent::fluent_args;
 //! use fluent_bundle::{FluentBundle, FluentResource};
 //! use fluent_datetime::{BundleExt, FluentDateTime};
-//! use icu_calendar::DateTime;
-//! use icu_datetime::options::length;
+//! use fluent_datetime::length;
+//! use icu_calendar::Iso;
+//! use icu_time::DateTime;
 //! use unic_langid::LanguageIdentifier;
 //!
 //! // Create a FluentBundle
@@ -46,7 +47,7 @@
 //!     .expect("Failed to add FTL resources to the bundle.");
 //!
 //! // Create an ICU DateTime
-//! let datetime = DateTime::try_new_iso_datetime(1989, 11, 9, 23, 30, 0)
+//! let datetime = DateTime::try_from_str("1989-11-09 23:30", Iso)
 //!     .expect("Failed to create ICU DateTime");
 //!
 //! // Convert to FluentDateTime
@@ -80,7 +81,7 @@
 //!     bundle.format_pattern(
 //!         &bundle.get_message("now-is-datetime").unwrap().value().unwrap(),
 //!         Some(&fluent_args!("date" => datetime.clone())), &mut errors),
-//!     "Now is \u{2068}Thursday, November 9, 1989, 11:30\u{202f}PM\u{2069}"
+//!     "Now is \u{2068}Thursday, November 9, 1989 at 11:30\u{202f}PM\u{2069}"
 //! );
 //!
 //! // Set FluentDateTime.options in code rather than in translation data
@@ -109,7 +110,9 @@ use fluent_bundle::types::FluentType;
 use fluent_bundle::{FluentArgs, FluentError, FluentValue};
 
 use icu_calendar::{Gregorian, Iso};
-use icu_datetime::options::length;
+use icu_time::DateTime;
+
+pub mod length;
 
 fn val_as_str<'a>(val: &'a FluentValue) -> Option<&'a str> {
     if let FluentValue::String(str) = val {
@@ -122,12 +125,7 @@ fn val_as_str<'a>(val: &'a FluentValue) -> Option<&'a str> {
 /// Options for formatting a DateTime
 #[derive(Debug, Clone, PartialEq)]
 pub struct FluentDateTimeOptions {
-    // This calendar arg makes loading provider data and memoizing formatters harder
-    // In particular, the AnyCalendarKind logic (in
-    // AnyCalendarKind::from_data_locale_with_fallback) that defaults to
-    // Gregorian for most calendars, except for the thai locale (Buddhist),
-    // isn't exposed.  So we would have to build the formatter and then decide
-    // if it is the correct one for the calendar we want.
+    // See AnyCalendarKind::new if we want to expose explicit calendar choice
     //calendar: Option<icu_calendar::AnyCalendarKind>,
     // We don't handle icu_datetime per-component settings atm, it is experimental
     // and length is expressive enough so far
@@ -160,29 +158,25 @@ impl Default for FluentDateTimeOptions {
 impl FluentDateTimeOptions {
     /// Set a date style, from verbose to compact
     ///
-    /// See [`icu_datetime::options::length::Date`].
+    /// See [`length::Date`].
     pub fn set_date_style(&mut self, style: Option<length::Date>) {
         self.length.date = style;
     }
 
     /// Set a time style, from verbose to compact
     ///
-    /// See [`icu_datetime::options::length::Time`].
+    /// See [`length::Time`].
     pub fn set_time_style(&mut self, style: Option<length::Time>) {
         self.length.time = style;
     }
 
     fn make_formatter(
         &self,
-        locale: &icu_provider::DataLocale,
-    ) -> Result<DateTimeFormatter, icu_datetime::DateTimeError> {
-        let mut length = self.length;
-        if length == length::Bag::empty() {
-            length = length::Bag::from_date_style(length::Date::Short);
-        }
+        langid: icu_locale_core::LanguageIdentifier,
+    ) -> Result<DateTimeFormatter, icu_datetime::DateTimeFormatterLoadError> {
         Ok(DateTimeFormatter(icu_datetime::DateTimeFormatter::try_new(
-            locale,
-            length.into(),
+            langid.into(),
+            self.length.as_fieldset(),
         )?))
     }
 
@@ -226,29 +220,32 @@ impl std::hash::Hash for FluentDateTimeOptions {
 
 impl Eq for FluentDateTimeOptions {}
 
-/// An ICU [`DateTime`](icu_calendar::DateTime) with attached formatting options
+/// An ICU [`DateTime`](icu_time::DateTime) with attached formatting options
 ///
-/// Construct from an [`icu_calendar::DateTime`] using From / Into.
+/// Construct from an [`icu_time::DateTime`] using From / Into.
 ///
 /// Convert to a [`FluentValue`] with From / Into.
 ///
 /// See [`FluentDateTimeOptions`] and [`FluentDateTimeOptions::default`].
 ///
 ///```
-/// use icu_calendar::DateTime;
+/// use icu_time::DateTime;
+/// use icu_calendar::Iso;
 /// use fluent_datetime::FluentDateTime;
 ///
-/// let datetime = DateTime::try_new_iso_datetime(1989, 11, 9, 23, 30, 0)
+/// let datetime = DateTime::try_from_str("1989-11-09 23:30", Iso)
 ///     .expect("Failed to create ICU DateTime");
 ///
 /// let datetime = FluentDateTime::from(datetime);
 // ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct FluentDateTime {
-    // Iso seemed like a natural default, but [AnyCalendarKind::from_data_locale_with_fallback]
+    // Iso seemed like a natural default, but [AnyCalendarKind::new]
     // loads Gregorian in almost all cases.  Differences have to do with eras:
-    // proleptic Gregorian has BCE / CE and no year zero, iso has just the one era and a year zero
-    value: icu_calendar::DateTime<Gregorian>,
+    // proleptic Gregorian has BCE / CE and no year zero, Iso has just the one era,
+    // containing year zero (astronomical year numbering)
+    // OTOH, DateTime<Gregorian> does not implement PartialEq and with Iso it does
+    value: DateTime<Iso>,
     /// Options for rendering
     pub options: FluentDateTimeOptions,
 }
@@ -262,9 +259,7 @@ impl FluentType for FluentDateTime {
     fn as_string(&self, intls: &intl_memoizer::IntlLangMemoizer) -> Cow<'static, str> {
         intls
             .with_try_get::<DateTimeFormatter, _, _>(self.options.clone(), |dtf| {
-                dtf.0
-                    .format_to_string(&self.value.to_any())
-                    .unwrap_or_default()
+                dtf.0.format(&self.value).to_string()
             })
             .unwrap_or_default()
             .into()
@@ -278,33 +273,35 @@ impl FluentType for FluentDateTime {
         let lang = intls
             .with_try_get::<GimmeTheLocale, _, _>((), |gimme| gimme.0.clone())
             .expect("Infallible");
-        let Some(langid): Option<icu_locid::LanguageIdentifier> = lang.to_string().parse().ok()
+        let Some(langid): Option<icu_locale_core::LanguageIdentifier> =
+            lang.to_string().parse().ok()
         else {
             return "".into();
         };
-        let Ok(dtf) = self.options.make_formatter(&langid.into()) else {
+        let Ok(dtf) = self.options.make_formatter(langid) else {
             return "".into();
         };
-        dtf.0
-            .format_to_string(&self.value.to_any())
-            .unwrap_or_default()
-            .into()
+        dtf.0.format(&self.value).to_string().into()
     }
 }
 
-impl From<icu_calendar::DateTime<Gregorian>> for FluentDateTime {
-    fn from(value: icu_calendar::DateTime<Gregorian>) -> Self {
+impl From<DateTime<Gregorian>> for FluentDateTime {
+    fn from(value: DateTime<Gregorian>) -> Self {
+        // Not using ConvertCalendar because it would introduce DateTime<Ref<AnyCalendar>> and we don't need ref indirection
         Self {
-            value,
+            value: DateTime {
+                date: value.date.to_iso(),
+                time: value.time,
+            },
             options: Default::default(),
         }
     }
 }
 
-impl From<icu_calendar::DateTime<Iso>> for FluentDateTime {
-    fn from(value: icu_calendar::DateTime<Iso>) -> Self {
+impl From<DateTime<Iso>> for FluentDateTime {
+    fn from(value: DateTime<Iso>) -> Self {
         Self {
-            value: value.to_calendar(Gregorian),
+            value,
             options: Default::default(),
         }
     }
@@ -316,7 +313,9 @@ impl From<FluentDateTime> for FluentValue<'static> {
     }
 }
 
-struct DateTimeFormatter(icu_datetime::DateTimeFormatter);
+struct DateTimeFormatter(
+    icu_datetime::DateTimeFormatter<icu_datetime::fieldsets::enums::CompositeDateTimeFieldSet>,
+);
 
 impl intl_memoizer::Memoizable for DateTimeFormatter {
     type Args = FluentDateTimeOptions;
@@ -330,9 +329,10 @@ impl intl_memoizer::Memoizable for DateTimeFormatter {
     where
         Self: std::marker::Sized,
     {
-        // Convert LanguageIdentifier from unic_langid to icu_locid
-        let langid: icu_locid::LanguageIdentifier = lang.to_string().parse().map_err(|_| ())?;
-        args.make_formatter(&langid.into()).map_err(|_| ())
+        // Convert LanguageIdentifier from unic_langid to icu
+        let langid: icu_locale_core::LanguageIdentifier =
+            lang.to_string().parse().map_err(|_| ())?;
+        args.make_formatter(langid).map_err(|_| ())
     }
 }
 
@@ -391,9 +391,26 @@ impl intl_memoizer::Memoizable for GimmeTheLocale {
 /// [datetime-fluent]: https://projectfluent.org/fluent/guide/functions.html#datetime
 /// [Intl.DateTimeFormat]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/DateTimeFormat/DateTimeFormat
 /// [ECMA 402]: https://tc39.es/ecma402/#sec-createdatetimeformat
+// Known implementations of Intl.DateTimeFormat.DateTimeFormat().  All use ICU.
+// https://searchfox.org/firefox-main/source/js/src/builtin/intl/DateTimeFormat.js (MPL-2.0)
+// https://searchfox.org/firefox-main/source/js/src/builtin/intl/DateTimeFormat.cpp
+// https://chromium.googlesource.com/v8/v8/+/main/src/objects/js-date-time-format.cc (BSD-3-Clause)
+// https://github.com/WebKit/webkit/blob/main/Source/JavaScriptCore/runtime/IntlDateTimeFormat.cpp (BSD-2-Clause)
+// https://github.com/LadybirdBrowser/ladybird/blob/master/Libraries/LibJS/Runtime/Intl/DateTimeFormatConstructor.cpp (BSD-2-Clause)
+// https://github.com/formatjs/formatjs/tree/main/packages/intl-datetimeformat (MIT)
+// https://github.com/formatjs/formatjs/blob/main/packages/intl-datetimeformat/src/abstract/InitializeDateTimeFormat.ts
+// https://github.com/google/rust_icu/blob/main/rust_icu_ecma402/src/datetimeformat.rs (Apache-2.0, ICU4C)
+//   does new_with_pattern but never calls new_with_styles, does not handle dateStyle/timeStyle
+// https://github.com/unicode-org/icu4x/tree/main/ffi/ecma402 (Unicode-3.0; mostly a placeholder, does not impl DateTimeFormat)
+//
+// styles map to an UDateFormatStyle in ICU4C;
+// I don't understand how ICU4X has reduced the number of styles (removed full, kept only short medium long)
+// https://unicode-org.github.io/icu-docs/apidoc/dev/icu4c/udat_8h.html#adb4c5a95efb888d04d38db7b3efff0c5
+// Explanation of the API change and mapping here:
+// https://github.com/unicode-org/icu4x/issues/7523#issuecomment-3820793161
 #[allow(non_snake_case)]
 pub fn DATETIME<'a>(positional: &[FluentValue<'a>], named: &FluentArgs) -> FluentValue<'a> {
-    match positional.get(0) {
+    match positional.first() {
         Some(FluentValue::Custom(cus)) => {
             if let Some(dt) = cus.as_any().downcast_ref::<FluentDateTime>() {
                 let mut dt = dt.clone();

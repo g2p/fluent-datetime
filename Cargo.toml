@@ -8,10 +8,10 @@ repository = "https://github.com/g2p/fluent-datetime"
 
 [dependencies]
 fluent-bundle = "0.16"
-icu_calendar = "1.3"
-icu_datetime = "1.3"
-icu_locid = "1.3"
-icu_provider = "1.3"
+icu_calendar = "2"
+icu_datetime = "2"
+icu_locale_core = "2"
+icu_time = "2"
 intl-memoizer = "0.5.3"
 unic-langid = "0.9"
 
