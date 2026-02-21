@@ -36,6 +36,7 @@
 //! today-is = Today is {$date}
 //! today-is-fulldate = Today is {DATETIME($date, dateStyle: "full")}
 //! now-is-time = Now is {DATETIME($date, timeStyle: "medium")}
+//! now-is-longtime = Now is {DATETIME($date, timeStyle: "long")}
 //! now-is-datetime = Now is {DATETIME($date, dateStyle: "full", timeStyle: "short")}
 //! "#
 //! .to_string();
@@ -77,6 +78,13 @@
 //!     "Now is \u{2068}11:30:00\u{202f}PM\u{2069}"
 //! );
 //!
+//! assert!(
+//!     bundle.format_pattern(
+//!         &bundle.get_message("now-is-longtime").unwrap().value().unwrap(),
+//!         Some(&fluent_args!("date" => datetime.clone())), &mut errors).starts_with(
+//!             "Now is \u{2068}11:30:00\u{202f}PM ")
+//! );
+//!
 //! assert_eq!(
 //!     bundle.format_pattern(
 //!         &bundle.get_message("now-is-datetime").unwrap().value().unwrap(),
@@ -104,13 +112,15 @@
 #![warn(missing_docs)]
 use std::borrow::Cow;
 use std::mem::discriminant;
+use std::sync::LazyLock;
 
 use fluent_bundle::bundle::FluentBundle;
 use fluent_bundle::types::FluentType;
 use fluent_bundle::{FluentArgs, FluentError, FluentValue};
 
 use icu_calendar::{Gregorian, Iso};
-use icu_time::DateTime;
+use icu_datetime::fieldsets;
+use icu_time::{DateTime, ZonedDateTime};
 
 pub mod length;
 
@@ -174,10 +184,20 @@ impl FluentDateTimeOptions {
         &self,
         langid: icu_locale_core::LanguageIdentifier,
     ) -> Result<DateTimeFormatter, icu_datetime::DateTimeFormatterLoadError> {
-        Ok(DateTimeFormatter(icu_datetime::DateTimeFormatter::try_new(
-            langid.into(),
-            self.length.as_fieldset(),
-        )?))
+        let fsb = self.length.to_fieldset_builder();
+        let formatter_prefs = langid.into();
+        // build_().unwrap(): If we set any incompatible options, it's a bug
+        Ok(if fsb.zone_style.is_some() {
+            DateTimeFormatter::WithZone(icu_datetime::DateTimeFormatter::try_new(
+                formatter_prefs,
+                fsb.build_composite().unwrap(),
+            )?)
+        } else {
+            DateTimeFormatter::NoZone(icu_datetime::DateTimeFormatter::try_new(
+                formatter_prefs,
+                fsb.build_composite_datetime().unwrap(),
+            )?)
+        })
     }
 
     fn merge_args(&mut self, other: &FluentArgs) -> Result<(), ()> {
@@ -242,9 +262,32 @@ impl Eq for FluentDateTimeOptions {}
 pub struct FluentDateTime {
     // Iso seemed like a natural default, but [AnyCalendarKind::new]
     // loads Gregorian in almost all cases.  Differences have to do with eras:
-    // proleptic Gregorian has BCE / CE and no year zero, Iso has just the one era,
+    // proleptic Gregorian has BCE / CE and no year zero, Iso has just one continuous era,
     // containing year zero (astronomical year numbering)
     // OTOH, DateTime<Gregorian> does not implement PartialEq and with Iso it does
+
+    // long/full timeStyles will use zone info, forcing us into a ZonedDateTime
+    // On the other hand, [DateTimeFormat.format] explicitly rejects Temporal.ZonedDateTime
+    // https://github.com/tc39/proposal-temporal/blob/514c656854e5ceab4932cfc23ace0f84ca1f6431/meetings/agenda-minutes-2023-03-16.md#zoneddatetime-in-intldatetimeformatformat-2479
+    //
+    // JS Date doesn't carry a time zone, and formatting is implicitly done in
+    // the local time zone.
+    // Temporal.Now.timeZoneId()
+    // new Intl.DateTimeFormat().resolvedOptions().timeZone
+    //
+    // https://tc39.es/ecma402/#sec-createdatetimeformat
+    // Which initializes an internal TimeZone field
+    //
+    // So now we need a dependency on the system time zone.
+    // jiff rolls its own (and is lighter on dependencies and build time;
+    // see windows-sys vs windows-core).  It also handles the TZ env var.
+    // Most other crates (chrono, temporal_rs) depend on iana-time-zone
+    // to figure out the system time zone.
+    //
+    // TZ=Europe/Paris deno eval --unstable-temporal --print 'Temporal.Now.timeZoneId()'
+    // TZ=Europe/Berlin deno eval --print 'new Intl.DateTimeFormat("en-US", {dateStyle: "long", timeStyle: "long"}).format(new Date(1989, 11, 9))'
+    //
+    // DateTimeFormat.format: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/DateTimeFormat/format
     value: DateTime<Iso>,
     /// Options for rendering
     pub options: FluentDateTimeOptions,
@@ -259,7 +302,7 @@ impl FluentType for FluentDateTime {
     fn as_string(&self, intls: &intl_memoizer::IntlLangMemoizer) -> Cow<'static, str> {
         intls
             .with_try_get::<DateTimeFormatter, _, _>(self.options.clone(), |dtf| {
-                dtf.0.format(&self.value).to_string()
+                dtf.format(&self.value).to_string()
             })
             .unwrap_or_default()
             .into()
@@ -281,7 +324,7 @@ impl FluentType for FluentDateTime {
         let Ok(dtf) = self.options.make_formatter(langid) else {
             return "".into();
         };
-        dtf.0.format(&self.value).to_string().into()
+        dtf.format(&self.value).to_string().into()
     }
 }
 
@@ -313,9 +356,85 @@ impl From<FluentDateTime> for FluentValue<'static> {
     }
 }
 
-struct DateTimeFormatter(
-    icu_datetime::DateTimeFormatter<icu_datetime::fieldsets::enums::CompositeDateTimeFieldSet>,
-);
+static SYSTEM_TZ: LazyLock<jiff::tz::TimeZone> = LazyLock::new(|| jiff::tz::TimeZone::system());
+
+fn clamp_datetime_for_jiff(dt: &DateTime<Iso>) -> Cow<'_, DateTime<Iso>> {
+    if dt.time.second < 60u8.try_into().unwrap() {
+        Cow::Borrowed(dt)
+    } else {
+        let mut dt = dt.clone();
+        dt.time.second = 59u8.try_into().unwrap();
+        dt.time.subsecond = 999_999_999u32.try_into().unwrap();
+        Cow::Owned(dt)
+    }
+}
+
+fn naive_datetime_to_system(
+    dt: &DateTime<Iso>,
+) -> ZonedDateTime<Iso, icu_time::TimeZoneInfo<icu_time::zone::models::AtTime>> {
+    // There are ambiguities and invalidities to handle during DST transitions
+    // naive datetimes that don't in fact exist (winter -> summer)
+    // naive datetimes that can refer to two instants (summer -> winter)
+    // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Temporal/ZonedDateTime#ambiguity_and_gaps_from_local_time_to_utc_time
+    // When constructing a ZonedDateTime from a local time, the behavior for
+    // ambiguity and gaps is configurable via the disambiguation option:
+    //
+    // earlier
+    //
+    // If there are two possible instants, choose the earlier one. If there is
+    // a gap, go back by the gap duration.
+    //
+    // later
+    //
+    // If there are two possible instants, choose the later one. If there is a
+    // gap, go forward by the gap duration.
+    //
+    // compatible (default)
+    //
+    // Same behavior as Date: use later for gaps and earlier for ambiguities.
+    // If there are two possible instants, choose the earlier one.
+    // If there is a gap, go forward by the gap duration.
+    //
+    // There are also offset ambiguities, which we don't have to worry about because
+    // naive datetimes are offset free.
+    // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Temporal/ZonedDateTime#offset_ambiguity
+    // timeStyles long and full map to SpecificShort and SpecificLong,
+    // but they still need the full AtTime model
+    //
+    // jiff to_zoned uses the "compatible" strategy so we can just do the conversion
+    // on the jiff side
+
+    // Errors can come from
+    // https://docs.rs/jiff/latest/jiff/civil/struct.Date.html#method.new
+    // https://docs.rs/jiff/latest/jiff/civil/struct.Time.html#method.new
+    // and are due to invalid ranges
+    // I find it dodgy that jiff doesn't clamp leap seconds here; we'll do it ourselves
+    let jdt = jiff_icu::ConvertTryInto::<jiff::civil::DateTime>::convert_try_into(
+        *clamp_datetime_for_jiff(dt),
+    )
+    .unwrap();
+    jiff_icu::ConvertInto::convert_into(&jdt.to_zoned(SYSTEM_TZ.to_owned()).unwrap())
+}
+
+// With this, we won't necessarily need to build a zoned DateTime at format time
+// It's okay to use general enums; building is module-local and LLVM should be
+// able to keep track of constructed variants
+enum DateTimeFormatter {
+    WithZone(
+        icu_datetime::DateTimeFormatter<fieldsets::enums::CompositeFieldSet>,
+        //icu_datetime::DateTimeFormatter<fieldsets::Combo<fieldsets::enums::CompositeDateTimeFieldSet, fieldsets::enums::ZoneFieldSet>>
+    ),
+    NoZone(icu_datetime::DateTimeFormatter<fieldsets::enums::CompositeDateTimeFieldSet>),
+}
+
+impl DateTimeFormatter {
+    fn format(&self, dt: &DateTime<Iso>) -> icu_datetime::FormattedDateTime<'_> {
+        match self {
+            Self::WithZone(dtf) => dtf.format(&naive_datetime_to_system(dt)),
+            Self::NoZone(dtf) => dtf.format(dt),
+        }
+    }
+}
 
 impl intl_memoizer::Memoizable for DateTimeFormatter {
     type Args = FluentDateTimeOptions;
@@ -396,12 +515,18 @@ impl intl_memoizer::Memoizable for GimmeTheLocale {
 // https://searchfox.org/firefox-main/source/js/src/builtin/intl/DateTimeFormat.cpp
 // https://chromium.googlesource.com/v8/v8/+/main/src/objects/js-date-time-format.cc (BSD-3-Clause)
 // https://github.com/WebKit/webkit/blob/main/Source/JavaScriptCore/runtime/IntlDateTimeFormat.cpp (BSD-2-Clause)
+// deno eval --print 'new Intl.DateTimeFormat("en-US", {dateStyle: "full", timeStyle: "full"}).format(new Date())'
 // https://github.com/LadybirdBrowser/ladybird/blob/master/Libraries/LibJS/Runtime/Intl/DateTimeFormatConstructor.cpp (BSD-2-Clause)
 // https://github.com/formatjs/formatjs/tree/main/packages/intl-datetimeformat (MIT)
 // https://github.com/formatjs/formatjs/blob/main/packages/intl-datetimeformat/src/abstract/InitializeDateTimeFormat.ts
 // https://github.com/google/rust_icu/blob/main/rust_icu_ecma402/src/datetimeformat.rs (Apache-2.0, ICU4C)
 //   does new_with_pattern but never calls new_with_styles, does not handle dateStyle/timeStyle
 // https://github.com/unicode-org/icu4x/tree/main/ffi/ecma402 (Unicode-3.0; mostly a placeholder, does not impl DateTimeFormat)
+// https://codeberg.org/kiesel-js/kiesel/src/branch/main/src/builtins/intl/date_time_format.zig
+// https://github.com/boa-dev/boa/tree/main/core/engine/src/builtins/intl/date_time_format
+// Boa looks reasonable, could be extracted
+// Except it prints in UTC, not local, and does not respect long/full timeStyles.  Test with:
+// cargo run -p boa_cli -- -e 'new Intl.DateTimeFormat("en-US", {dateStyle: "full", timeStyle: "full"}).format(new Date())'
 //
 // styles map to an UDateFormatStyle in ICU4C;
 // I don't understand how ICU4X has reduced the number of styles (removed full, kept only short medium long)

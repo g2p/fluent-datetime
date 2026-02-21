@@ -1,9 +1,22 @@
+//! Length is a model of encoding information on how to format date and time by
+//! specifying the preferred length ! of date and time fields.
+//!
+//! It is intended to represent dateStyle and timeStyle from
+//! ECMA 402 DateTimeFormat constructor options.
+//!
+//! If either of the fields is omitted, the value will be formatted according to
+//! the pattern associated with the ! preferred length of the present field in a
+//! given locale.
+//!
+//! If both fields are present, both parts of the value will be formatted and an
+//! additional connector pattern ! will be used to construct a full result.
+//! The type of the connector is determined by the length of the [`Date`] field.
+
 // Restored from icu_datetime 1
 // https://docs.rs/icu_datetime/1.5.1/src/icu_datetime/options/length.rs.html
 
-use icu_datetime::fieldsets::builder::{FieldSetBuilder, ZoneStyle};
-use icu_datetime::fieldsets::enums::CompositeDateTimeFieldSet;
-use icu_datetime::options::TimePrecision;
+use icu_datetime::fieldsets::builder::{DateFields, FieldSetBuilder, ZoneStyle};
+use icu_datetime::options::{Length, TimePrecision};
 
 /// Represents different lengths a date part can be formatted into.
 /// Each length has associated best pattern for it for a given locale.
@@ -130,8 +143,8 @@ impl Bag {
     }
 
     // For a Copy type, is it as_ or to_?
-    pub fn as_fieldset(self) -> CompositeDateTimeFieldSet {
-        use icu_datetime::options;
+    // https://rust-lang.github.io/api-guidelines/naming.html#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv
+    pub(super) fn to_fieldset_builder(self) -> FieldSetBuilder {
         let (date, time) = if self == Self::empty() {
             (Some(Date::Short), None)
         } else {
@@ -140,14 +153,14 @@ impl Bag {
         let mut builder = FieldSetBuilder::new();
         if let Some(date) = date {
             builder.date_fields = Some(if date == Date::Full {
-                icu_datetime::fieldsets::builder::DateFields::YMDE
+                DateFields::YMDE
             } else {
-                icu_datetime::fieldsets::builder::DateFields::YMD
+                DateFields::YMD
             });
             builder.length = Some(match date {
-                Date::Full | Date::Long => options::Length::Long,
-                Date::Medium => options::Length::Medium,
-                Date::Short => options::Length::Short,
+                Date::Full | Date::Long => Length::Long,
+                Date::Medium => Length::Medium,
+                Date::Short => Length::Short,
             });
         }
         if let Some(time) = time {
@@ -162,7 +175,6 @@ impl Bag {
                 builder.zone_style = Some(ZoneStyle::SpecificShort)
             }
         }
-        // If we set any incompatible options, it's a bug
-        builder.build_composite_datetime().unwrap()
+        builder
     }
 }

@@ -13,6 +13,8 @@ icu_datetime = "2"
 icu_locale_core = "2"
 icu_time = "2"
 intl-memoizer = "0.5.3"
+jiff = "0.2.20"
+jiff-icu = "0.2.2"
 unic-langid = "0.9"
 
 [dev-dependencies]
